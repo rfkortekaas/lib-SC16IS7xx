@@ -1,0 +1,22 @@
+{
+    "name": "SC16IS7xx",
+    "version": "0.1.0",
+    "description": "Library for the SC16IS7xx Dual UART with I2C-bus/SPI interface.",
+    "keywords": "sc16is7xx, spi, uart, driver",
+    "repository": 
+    {
+        "type": "git",
+        "url": "https://github.com/rfkortekaas/lib-SC16IS7xx.git"
+    },
+    "authors":
+    [
+        {
+            "name": "R.F. Kortekaas"
+        }
+    ],
+    "dependencies":
+    [
+    ],
+    "frameworks": "arduino",
+    "platforms": "*"
+}
