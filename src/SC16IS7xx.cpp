@@ -6,7 +6,9 @@
 #include "SC16IS7xx.h"
 #include "SC16IS7xx_reg.h"
 
-SC16IS7xx::SC16IS7xx(spi_host_device_t host, gpio_num_t cs, gpio_num_t reset) {
+spi_device_handle_t SC16IS7xx::_spi = NULL;
+
+SC16IS7xx::SC16IS7xx(int uart_nr, spi_host_device_t host, gpio_num_t cs, gpio_num_t reset) : _uart_nr(uart_nr) {
     spi_device_interface_config_t devcfg =
     {
         command_bits: 0,
@@ -28,21 +30,23 @@ SC16IS7xx::SC16IS7xx(spi_host_device_t host, gpio_num_t cs, gpio_num_t reset) {
 
     esp_err_t ret = spi_bus_add_device(host, &devcfg, &_spi);
     ESP_ERROR_CHECK(ret);
-}
-
-esp_err_t SC16IS7xx::init() {
     pinMode(device_reset_pin, OUTPUT);
     digitalWrite(device_reset_pin, LOW);
     delay(10);
     digitalWrite(device_reset_pin, HIGH);
     delay(10);
 
-    acquire_bus();
-
     reset_device();
     enable_fifo(true);
+}
 
-    return ESP_OK;
+SC16IS7xx::SC16IS7xx(int uart_nr) : _uart_nr(uart_nr) {
+    enable_fifo(true);
+}
+
+void SC16IS7xx::begin(const uint32_t baudrate, const uint32_t config, unsigned long timeout_ms) {
+    set_baudrate(baudrate);
+    set_line(8, 0, 1);
 }
 
 esp_err_t SC16IS7xx::acquire_bus() {
@@ -68,11 +72,9 @@ void SC16IS7xx::release_bus() {
     }
 }
 
-int16_t SC16IS7xx::set_baudrate(const uint32_t crystal_frequency, const uint32_t baudrate) {
+int16_t SC16IS7xx::set_baudrate(const uint32_t baudrate) {
     uint16_t divisor;
     uint8_t prescaler;
-    uint32_t actual_baudrate;
-    int16_t error;
     uint8_t temp_lcr;
     
     if ((read_register(SC16IS7XX_REG_MCR) & 0x80) == 0) {
@@ -81,7 +83,7 @@ int16_t SC16IS7xx::set_baudrate(const uint32_t crystal_frequency, const uint32_t
         prescaler = 4;
     }
 
-    divisor = (crystal_frequency/prescaler)/(baudrate*16) + 1;
+    divisor = (SC16IS7XX_XTAL_FREQ/prescaler)/(baudrate*16) + 1;
 
     temp_lcr = read_register(SC16IS7XX_REG_LCR);
     temp_lcr |= 0x80;
@@ -93,23 +95,10 @@ int16_t SC16IS7xx::set_baudrate(const uint32_t crystal_frequency, const uint32_t
     temp_lcr &= 0x7F;
     write_register(SC16IS7XX_REG_LCR, temp_lcr);
     
-    actual_baudrate = (crystal_frequency/prescaler)/(16*divisor);
-    error = ((float)actual_baudrate-baudrate)*1000/baudrate;
+    _actual_baudrate = (SC16IS7XX_XTAL_FREQ/prescaler)/(16*divisor);
+    _error = ((float)_actual_baudrate-baudrate)*1000/baudrate;
 
-    Serial.print("Crystal: ");
-    Serial.println(crystal_frequency,DEC);
-    Serial.print("Desired baudrate: ");
-    Serial.println(baudrate,DEC);
-    Serial.print("Prescaler: ");
-    Serial.println(prescaler,DEC);
-    Serial.print("Calculated divisor: ");
-    Serial.println(divisor,DEC);
-    Serial.print("Actual baudrate: ");
-    Serial.println(actual_baudrate,DEC);
-    Serial.print("Baudrate error: ");
-    Serial.println(error,DEC);
-
-    return error;
+    return _error;
 }
 
 void SC16IS7xx::set_line(const uint8_t data_length, const uint8_t parity_select, uint8_t stop_length) {
@@ -163,10 +152,16 @@ uint8_t SC16IS7xx::read_register(const uint8_t register_address) {
     t.flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA;
     t.length = 16;
     t.rxlength = 8;
-    t.tx_data[0] = 0x82|(register_address<<3);
+    if (_uart_nr == 1) {
+        t.tx_data[0] = 0x82|(register_address<<3);
+    } else {
+        t.tx_data[0] = 0x80|(register_address<<3);
+    }
     t.tx_data[1] = 0xFF;
 
+    acquire_bus();
     ret = spi_device_polling_transmit(_spi, &t);
+    release_bus();
     ESP_ERROR_CHECK(ret);
     return t.rx_data[1];
 }
@@ -178,31 +173,73 @@ void SC16IS7xx::write_register(const uint8_t register_address, const uint8_t val
     t.flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA;
     t.length = 16;
     t.rxlength = 0;
-    t.tx_data[0] = 0x2|register_address << 3;
+    if (_uart_nr == 1) {
+        t.tx_data[0] = 0x2|register_address << 3;
+    } else {
+        t.tx_data[0] = register_address << 3;
+    }
     t.tx_data[1] = val;
-    
+    acquire_bus();
     ret = spi_device_polling_transmit(_spi, &t);
+    release_bus();
     ESP_ERROR_CHECK(ret);
 }
 
-void SC16IS7xx::write(uint8_t val) {
+size_t SC16IS7xx::write(uint8_t c) {
     uint8_t tmp_lsr;
 
     do {
         tmp_lsr = read_register(SC16IS7XX_REG_LSR);
     } while ((tmp_lsr & 0x20) == 0);
 
-    write_register(SC16IS7XX_REG_THR, val);
+    write_register(SC16IS7XX_REG_THR, c);
+    return 1;
 }
 
-int16_t SC16IS7xx::read(void) {
+size_t SC16IS7xx::write(const uint8_t *buffer, size_t size) {
+    size_t len = size;
+    while (len) {
+        write(*buffer++);
+        len--;
+    }
+    return size;
+}
+
+int SC16IS7xx::available(void) {
+    return read_register(SC16IS7XX_REG_RXLVL);
+}
+
+int SC16IS7xx::peek(void) {
     volatile uint8_t val;
 
     val = -1;
     if (read_register(SC16IS7XX_REG_RXLVL)) {
+        val = -1;
+    }
+    return val;
+}
+
+void SC16IS7xx::flush(void) {
+    uint8_t tmp_lsr;
+
+    do {
+        tmp_lsr = read_register(SC16IS7XX_REG_LSR);
+    } while ((tmp_lsr & 0x20) == 0);
+}
+
+
+int SC16IS7xx::read(void) {
+    volatile int val;
+
+    val = -1;
+    if (read_register(SC16IS7XX_REG_RXLVL) != 0) {
         val = read_register(SC16IS7XX_REG_RHR);
     }
     return val;
+}
+
+uint32_t SC16IS7xx::baudRate() {
+    return _actual_baudrate;
 }
 
 void SC16IS7xx::reset_device(void) {
@@ -224,4 +261,15 @@ void SC16IS7xx::enable_fifo(const bool fifo_enable) {
         temp_fcr |= 0x01;
     }
     write_register(SC16IS7XX_REG_FCR, temp_fcr);
+
+    temp_fcr = read_register(SC16IS7XX_REG_FCR);
+    temp_fcr |= 0x04;
+    write_register(SC16IS7XX_REG_FCR, temp_fcr);
+    temp_fcr = read_register(SC16IS7XX_REG_FCR);
+    temp_fcr |= 0x02;
+    write_register(SC16IS7XX_REG_FCR, temp_fcr);
+}
+
+SC16IS7xx::operator bool() const {
+    return true;
 }

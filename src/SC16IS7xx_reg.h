@@ -43,4 +43,6 @@
 #define SC16IS7XX_INT_THR        (0X02)
 #define SC16IS7XX_INT_RHR        (0X01)
 
+#define SC16IS7XX_SERIAL_8N1     (0x00)
+
 #endif // __SC16IS7XX_REG_H
